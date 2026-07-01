@@ -14,8 +14,10 @@ import {
   Zap,
 } from "lucide-react";
 
-const API_BASE = "https://api.cuki.biz.id/api/downloader/aio?apikey=cuki-x&url=";
-const SNACKVIDEO_API_BASE = "https://api.cuki.biz.id/api/downloader/snackVideo?apikey=cuki-x&url=";
+// These now point to our own Vercel serverless function (see /api/download.js),
+// which proxies the request server-side to avoid browser CORS restrictions
+// and to keep the API key out of client-side code.
+const PROXY_ENDPOINT = "/api/download";
 
 const PLATFORMS = [
   { id: "youtube", mono: "YT", label: "YouTube", placeholder: "https://youtube.com/shorts/..." },
@@ -144,8 +146,10 @@ export default function TarikApp() {
     setLoading(true);
     try {
       const isSnackVideo = active.id === "snackvideo";
-      const endpoint = isSnackVideo ? SNACKVIDEO_API_BASE : API_BASE;
-      const res = await fetch(endpoint + encodeURIComponent(url.trim()));
+      const platformParam = isSnackVideo ? "snackvideo" : "aio";
+      const res = await fetch(
+        `${PROXY_ENDPOINT}?platform=${platformParam}&url=${encodeURIComponent(url.trim())}`
+      );
       if (!res.ok) throw new Error(`Server merespons dengan status ${res.status}`);
       const json = await res.json();
       if (!json.success || !json.data) {
@@ -267,7 +271,7 @@ export default function TarikApp() {
       <header className="sticky top-0 z-20" style={{ background: "var(--paper)", borderBottom: "1px solid var(--line)" }}>
         <div className="max-w-5xl mx-auto px-5 sm:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="f-display text-xl font-bold tracking-tight">NuuDown.</span>
+            <span className="f-display text-xl font-bold tracking-tight">TARIK.</span>
           </div>
           <nav className="hidden sm:flex items-center gap-8 text-sm text-[var(--slate)]">
             <a href="#platforms" className="hover:text-[var(--ink)] transition-colors">Platform</a>
@@ -447,7 +451,7 @@ export default function TarikApp() {
 
       <footer className="border-t" style={{ borderColor: "var(--line)" }}>
         <div className="max-w-5xl mx-auto px-5 sm:px-8 py-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[var(--slate-light)]">
-          <span className="f-display font-semibold text-[var(--ink)]">NuuDown.</span>
+          <span className="f-display font-semibold text-[var(--ink)]">TARIK.</span>
           <span>Gunakan hanya untuk konten yang kamu berhak unduh.</span>
         </div>
       </footer>
