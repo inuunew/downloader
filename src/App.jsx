@@ -14,9 +14,7 @@ import {
   Zap,
 } from "lucide-react";
 
-// These now point to our own Vercel serverless function (see /api/download.js),
-// which proxies the request server-side to avoid browser CORS restrictions
-// and to keep the API key out of client-side code.
+// Titik akhir API untuk proxy backend
 const PROXY_ENDPOINT = "/api/download";
 
 const PLATFORMS = [
@@ -52,7 +50,6 @@ function formatDuration(raw) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// Turns strings like "2 minutes 36 seconds" or "1 hour 4 minutes" into seconds.
 function parseDurationToSeconds(text) {
   if (!text) return null;
   if (typeof text === "number") return text;
@@ -66,9 +63,9 @@ function parseDurationToSeconds(text) {
   return total > 0 ? total : null;
 }
 
-// SnackVideo's endpoint returns a differently-shaped payload than the AIO
-// endpoint, so we normalize it into the same shape the rest of the UI expects
-// (title, thumbnail, author, source, duration, statistics, medias[]).
+// -------------------------------------------------------------
+// [JANGAN DIUBAH]: Normalisasi khusus SnackVideo sesuai pesanan
+// -------------------------------------------------------------
 function normalizeSnackVideo(data) {
   return {
     title: data.title || data.description || "Tanpa judul",
@@ -90,6 +87,64 @@ function normalizeSnackVideo(data) {
           },
         ]
       : [],
+  };
+}
+
+// -------------------------------------------------------------
+// [BARU]: Normalisasi untuk hasil Scrape Vidssave agar cocok dengan UI
+// -------------------------------------------------------------
+function normalizeVidssave(data) {
+  const medias = [];
+
+  if (data.videos && Array.isArray(data.videos)) {
+    data.videos.forEach((v) => {
+      medias.push({
+        type: "video",
+        url: v.download_url,
+        quality: v.quality,
+        extension: v.format,
+        data_size: v.size,
+      });
+    });
+  }
+
+  if (data.audios && Array.isArray(data.audios)) {
+    data.audios.forEach((a) => {
+      medias.push({
+        type: "audio",
+        url: a.download_url,
+        quality: a.quality,
+        extension: a.format,
+        data_size: a.size,
+      });
+    });
+  }
+
+  // Jika ada gambar (misal dari postingan Instagram/TikTok carousel)
+  // Vidssave biasanya menyimpannya di format tertentu, tapi kita filter jaga-jaga
+  if (data.images && Array.isArray(data.images)) {
+    data.images.forEach((img) => {
+      medias.push({
+        type: "image",
+        url: img.download_url,
+        quality: "HD",
+        extension: img.format || "jpg",
+        data_size: img.size,
+      });
+    });
+  }
+
+  return {
+    title: data.title || "Tanpa judul",
+    thumbnail: data.thumbnail,
+    author: "NuuDown API", // Vidssave kadang tidak membalas nama author
+    source: "Vidssave",
+    duration: parseDurationToSeconds(data.duration),
+    statistics: {
+      digg_count: data.like_count,
+      comment_count: data.comment_count,
+    },
+    medias: medias,
   };
 }
 
@@ -146,17 +201,23 @@ export default function TarikApp() {
     setLoading(true);
     try {
       const isSnackVideo = active.id === "snackvideo";
-      const platformParam = isSnackVideo ? "snackvideo" : "aio";
+      const platformParam = isSnackVideo ? "snackvideo" : "vidssave"; // Disesuaikan
+      
       const res = await fetch(
         `${PROXY_ENDPOINT}?platform=${platformParam}&url=${encodeURIComponent(url.trim())}`
       );
+      
       if (!res.ok) throw new Error(`Server merespons dengan status ${res.status}`);
       const json = await res.json();
-      if (!json.success || !json.data) {
-        throw new Error(json.message || "Tautan tidak bisa diproses. Cek lagi linknya.");
+      
+      if (!json.success) {
+        throw new Error(json.error || json.message || "Tautan tidak bisa diproses. Cek lagi linknya.");
       }
-      const normalized = isSnackVideo ? normalizeSnackVideo(json.data) : json.data;
+
+      // Normalisasi data yang masuk ke format UI
+      const normalized = isSnackVideo ? normalizeSnackVideo(json.data) : normalizeVidssave(json);
       setResult(normalized);
+
     } catch (err) {
       setError(
         err.message === "Failed to fetch"
@@ -271,7 +332,7 @@ export default function TarikApp() {
       <header className="sticky top-0 z-20" style={{ background: "var(--paper)", borderBottom: "1px solid var(--line)" }}>
         <div className="max-w-5xl mx-auto px-5 sm:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="f-display text-xl font-bold tracking-tight">TARIK.</span>
+            <span className="f-display text-xl font-bold tracking-tight">NuuDown</span>
           </div>
           <nav className="hidden sm:flex items-center gap-8 text-sm text-[var(--slate)]">
             <a href="#platforms" className="hover:text-[var(--ink)] transition-colors">Platform</a>
@@ -291,17 +352,16 @@ export default function TarikApp() {
         <div className="max-w-2xl">
           <div className="inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-wider text-[var(--slate)] mb-5">
             <Zap size={13} strokeWidth={2.5} />
-            <span>Satu API, delapan platform</span>
+            <span>InuuTyzDev Downloader in one website</span>
           </div>
           <h1 className="f-display font-bold leading-[1.05] text-[2.5rem] sm:text-[3.25rem] tracking-tight">
             Tempel tautan.
             <br />
-            Tarik videonya.
+            Download hasilnya.
           </h1>
           <p className="text-[var(--slate)] text-base sm:text-lg mt-4 leading-relaxed">
             YouTube, Instagram, TikTok, CapCut, Douyin, Facebook, X, sampai
-            SnackVideo — semua lewat satu kotak, tanpa watermark kalau
-            sumbernya tersedia.
+            SnackVideo — semua lewat satu kotak, tanpa watermark.
           </p>
         </div>
 
