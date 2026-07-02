@@ -1,23 +1,9 @@
 // /api/download.js
-// Vercel serverless function. Single entry point the frontend calls as
-// `/api/download?platform=<id>&url=<encoded video url>`.
-//
-// Responsibilities:
-//  1. Proxy/resolve each request server-side (avoids browser CORS issues and
-//     keeps upstream hosts / logic out of client-side code).
-//  2. Normalize every source's response into one consistent envelope:
-//       { success: true,  data: <raw platform payload> }
-//       { success: false, message: <human-readable error> }
-//     The frontend's per-platform `normalize()` functions take it from there.
-//
-// Requires: `npm install @distube/ytdl-core` (used for YouTube — see
-// handleYoutube below).
-
-import ytdl from "@distube/ytdl-core";
+import { gotScraping } from 'got-scraping';
+import { CookieJar } from 'tough-cookie';
+import readline from 'readline';
 
 const INUUTYZ_BASE = "https://api.inuutyz.web.id/api/download";
-
-// Maps our internal `platform` query param to the upstream inuutyz path.
 const INUUTYZ_PATHS = {
   tiktok_v2: "tiktok_v2",
   douyin: "douyin",
@@ -25,8 +11,6 @@ const INUUTYZ_PATHS = {
   capcut: "capcut",
 };
 
-// SnackVideo is served by a different provider than the rest — cuki.biz.id,
-// which requires an apikey query param.
 const CUKI_BASE = "https://api.cuki.biz.id/api/downloader";
 const CUKI_API_KEY = "cuki-x";
 
@@ -41,15 +25,12 @@ export default async function handler(req, res) {
     if (platform === "instagram") {
       return await handleInstagram(url, res);
     }
-
     if (platform === "youtube") {
-      return await handleYoutube(url, res);
+      return await handleYoutubeScraper(url, res);
     }
-
     if (platform === "snackvideo") {
       return await handleSnackVideo(url, res);
     }
-
     if (INUUTYZ_PATHS[platform]) {
       return await handleInuutyz(platform, url, res);
     }
@@ -62,190 +43,190 @@ export default async function handler(req, res) {
       message: "Gagal menghubungi server sumber. Coba lagi sebentar lagi.",
     });
   }
-};
+}
 
-// --- inuutyz-backed platforms (snackvideo, tiktok, douyin, twitter, capcut, aio/youtube) ---
+// --- YouTube: Menggunakan Custom Scraper (Snapscooper) ---
+async function handleYoutubeScraper(youtubeUrl, res) {
+  const type = 'video';
+  const quality = '720p';
+  const cookieJar = new CookieJar();
+
+  const baseHeaders = {
+    'sec-ch-ua-platform': '"Android"',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36',
+    'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'accept': 'application/json',
+    'origin': 'https://snapscooper.com',
+    'referer': 'https://snapscooper.com/tools/youtube',
+    'accept-language': 'en-US,en;q=0.9,id;q=0.8',
+  };
+
+  const client = gotScraping.extend({ cookieJar, headers: baseHeaders, http2: true });
+
+  try {
+    // Step 0: Bypass Turnstile API
+    const bypassApiUrl = 'https://zchat-1-zar-cfbypass.hf.space/solve?sitekey=0x4AAAAAADE4A2vZ35_4vI54&url=https://snapscooper.com';
+    const responseBypass = await gotScraping.get(bypassApiUrl).json();
+    
+    if (!responseBypass.success) {
+      return res.status(200).json({ success: false, message: "Gagal melewati sistem keamanan server." });
+    }
+    const turnstileToken = responseBypass.token;
+
+    // Step 1: Challenge Platform
+    const challengeUrl = 'https://snapscooper.com/cdn-cgi/challenge-platform/h/g/c/a1498ca01d39fdce';
+    await client.post(challengeUrl, {
+      json: { secondaryToken: turnstileToken, sitekey: '0x4AAAAAADE4A2vZ35_4vI54' }
+    });
+
+    // Step 2: Request Token
+    await client.post('https://snapscooper.com/api/token/request', {
+      json: { ct: turnstileToken }
+    }).json();
+
+    // Step 3: Verifikasi via SSE
+    const verifyStream = client.stream('https://snapscooper.com/api/token/verify', {
+      method: 'GET',
+      headers: { 'accept': 'text/event-stream', 'cache-control': 'no-cache', 'pragma': 'no-cache' }
+    });
+
+    const rlVerify = readline.createInterface({ input: verifyStream, terminal: false });
+    let isVerified = false;
+    for await (const line of rlVerify) {
+      if (line.includes('data: verified')) {
+        isVerified = true;
+        verifyStream.destroy();
+        break;
+      }
+    }
+
+    if (!isVerified) {
+      return res.status(200).json({ success: false, message: "Gagal verifikasi token (SSE)." });
+    }
+
+    // Step 4: Dapatkan Info Post
+    const resStep4 = await client.post('https://snapscooper.com/api/tool/post-info', {
+      json: { toolId: 'youtube', url: youtubeUrl, highres: false }
+    }).json();
+
+    if (!resStep4.contents || !resStep4.contents[0]) {
+      return res.status(200).json({ success: false, message: "Video tidak ditemukan atau tidak didukung." });
+    }
+
+    const mediaData = resStep4.contents[0];
+    const targetList = mediaData.videos;
+
+    if (!targetList || targetList.length === 0) {
+      return res.status(200).json({ success: false, message: "Format video tidak ditemukan." });
+    }
+
+    let selectedMedia = targetList.find(item => item.label.toLowerCase().includes(quality.toLowerCase())) || targetList[0];
+    let finalDownloadUrl = selectedMedia.url;
+
+    // Step 5 & 6: Proses Render jika dibutuhkan
+    if (selectedMedia.is_render !== false) {
+      const renderTriggerRes = await client.get(selectedMedia.url).json();
+      if (!renderTriggerRes.sseStatusUrl) {
+        return res.status(200).json({ success: false, message: "Gagal memulai proses render di server asal." });
+      }
+
+      const renderStream = client.stream(renderTriggerRes.sseStatusUrl, {
+        method: 'GET',
+        headers: { 'accept': 'text/event-stream', 'cache-control': 'no-cache', 'pragma': 'no-cache' }
+      });
+
+      const rlRender = readline.createInterface({ input: renderStream, terminal: false });
+      finalDownloadUrl = null;
+
+      for await (const line of rlRender) {
+        if (line.startsWith('data: ')) {
+          try {
+            const statusData = JSON.parse(line.replace('data: ', '').trim());
+            if (statusData.status === 'done' && statusData.output && statusData.output.url) {
+              finalDownloadUrl = statusData.output.url;
+              renderStream.destroy();
+              break;
+            }
+          } catch (err) {}
+        }
+      }
+    }
+
+    if (!finalDownloadUrl) {
+      return res.status(200).json({ success: false, message: "Gagal memproses video matang dari server." });
+    }
+
+    // Kembalikan format JSON sesuai ekspektasi frontend app.jsx
+    return res.status(200).json({
+      success: true,
+      data: {
+        title: resStep4.title || "YouTube Video",
+        thumbnail: resStep4.thumbnail || null, // Jika snapscooper mengembalikan thumbnail
+        author: resStep4.author || null,
+        source: 'youtube',
+        duration: null,
+        statistics: null,
+        medias: [{
+          type: type,
+          url: finalDownloadUrl,
+          quality: selectedMedia.label,
+          extension: 'mp4'
+        }]
+      }
+    });
+
+  } catch (error) {
+    console.error('[-] YouTube Scraper Error:', error.message);
+    return res.status(200).json({ success: false, message: "Terjadi kesalahan internal saat menarik video YouTube." });
+  }
+}
+
+// --- inuutyz-backed platforms ---
 async function handleInuutyz(platform, url, res) {
   const upstreamPath = INUUTYZ_PATHS[platform];
   const upstreamUrl = `${INUUTYZ_BASE}/${upstreamPath}?url=${encodeURIComponent(url)}`;
+  const upstreamRes = await fetch(upstreamUrl, { headers: { Accept: "application/json" } });
 
-  const upstreamRes = await fetch(upstreamUrl, {
-    headers: { Accept: "application/json" },
-  });
-
-  if (!upstreamRes.ok) {
-    return res.status(502).json({
-      success: false,
-      message: `Server sumber merespons dengan status ${upstreamRes.status}.`,
-    });
-  }
-
+  if (!upstreamRes.ok) return res.status(502).json({ success: false, message: `Server sumber merespons dengan status ${upstreamRes.status}.` });
   const json = await upstreamRes.json();
-
-  // inuutyz responses use `status` (bool) at the top level and nest the
-  // actual payload under `result`. A few endpoints (e.g. a raw "aio" style
-  // response) may already put the payload under `data` instead — handle both.
   const success = json.status === true || json.success === true;
   const payload = json.result || json.data || json;
 
-  if (!success || !payload) {
-    return res.status(200).json({
-      success: false,
-      message: json.message || "Tautan tidak valid atau video tidak ditemukan.",
-    });
-  }
-
+  if (!success || !payload) return res.status(200).json({ success: false, message: json.message || "Tautan tidak valid atau video tidak ditemukan." });
   return res.status(200).json({ success: true, data: payload });
 }
 
-// --- SnackVideo, served by cuki.biz.id (separate provider + apikey) ---
+// --- SnackVideo ---
 async function handleSnackVideo(url, res) {
   const upstreamUrl = `${CUKI_BASE}/snackVideo?apikey=${CUKI_API_KEY}&url=${encodeURIComponent(url)}`;
+  const upstreamRes = await fetch(upstreamUrl, { headers: { Accept: "application/json" } });
 
-  const upstreamRes = await fetch(upstreamUrl, {
-    headers: { Accept: "application/json" },
-  });
-
-  if (!upstreamRes.ok) {
-    return res.status(502).json({
-      success: false,
-      message: `Server sumber merespons dengan status ${upstreamRes.status}.`,
-    });
-  }
-
+  if (!upstreamRes.ok) return res.status(502).json({ success: false, message: `Server sumber merespons dengan status ${upstreamRes.status}.` });
   const json = await upstreamRes.json();
 
-  if (!json.success || !json.data) {
-    return res.status(200).json({
-      success: false,
-      message: json.message || "Tautan SnackVideo tidak valid atau video tidak ditemukan.",
-    });
-  }
-
+  if (!json.success || !json.data) return res.status(200).json({ success: false, message: json.message || "Tautan SnackVideo tidak valid." });
   return res.status(200).json({ success: true, data: json.data });
 }
 
-// --- YouTube, resolved directly with ytdl-core (no third-party site, no
-// CAPTCHA-bypass — this talks to YouTube's own player endpoints). ---
-async function handleYoutube(url, res) {
-  if (!ytdl.validateURL(url)) {
-    return res.status(200).json({ success: false, message: "Tautan YouTube tidak valid." });
-  }
-
-  let info;
-  try {
-    info = await ytdl.getInfo(url);
-  } catch (err) {
-    console.error("[download.js] ytdl.getInfo error:", err);
-    return res.status(200).json({
-      success: false,
-      message: "Video tidak bisa diakses (private, dihapus, atau dibatasi usia).",
-    });
-  }
-
-  const details = info.videoDetails;
-
-  // Formats that already bundle video+audio in one file (safe default, but
-  // YouTube usually only offers these up to 360p).
-  const combined = ytdl
-    .filterFormats(info.formats, "videoandaudio")
-    .sort((a, b) => (b.height || 0) - (a.height || 0));
-
-  // Higher-resolution video is normally video-only (adaptive streaming) —
-  // offer a couple of these too, clearly labeled as having no audio track.
-  const videoOnly = ytdl
-    .filterFormats(info.formats, "videoonly")
-    .sort((a, b) => (b.height || 0) - (a.height || 0))
-    .slice(0, 3);
-
-  const bestAudio = ytdl
-    .filterFormats(info.formats, "audioonly")
-    .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0];
-
-  const medias = [
-    ...combined.map((f) => ({
-      type: "video",
-      url: f.url,
-      quality: f.qualityLabel || "Default",
-      extension: f.container || "mp4",
-      data_size: f.contentLength ? Number(f.contentLength) : null,
-    })),
-    ...videoOnly.map((f) => ({
-      type: "video",
-      url: f.url,
-      quality: `${f.qualityLabel || "?"} (tanpa audio)`,
-      extension: f.container || "mp4",
-      data_size: f.contentLength ? Number(f.contentLength) : null,
-    })),
-    bestAudio
-      ? {
-          type: "audio",
-          url: bestAudio.url,
-          quality: bestAudio.audioBitrate ? `${bestAudio.audioBitrate}kbps` : "Audio",
-          extension: bestAudio.container || "m4a",
-          data_size: bestAudio.contentLength ? Number(bestAudio.contentLength) : null,
-        }
-      : null,
-  ].filter(Boolean);
-
-  if (!medias.length) {
-    return res.status(200).json({
-      success: false,
-      message: "Tidak ada format unduhan yang tersedia untuk video ini.",
-    });
-  }
-
-  const data = {
-    title: details.title,
-    thumbnail: details.thumbnails?.[details.thumbnails.length - 1]?.url,
-    author: details.author?.name,
-    source: "youtube",
-    duration: Number(details.lengthSeconds) || null,
-    // YouTube doesn't reliably expose public like/comment/share counts via
-    // ytdl-core — omit rather than guess. `digg_count` is filled only when present.
-    statistics: {
-      digg_count: details.likes ?? null,
-      comment_count: null,
-      share_count: null,
-    },
-    medias,
-  };
-
-  return res.status(200).json({ success: true, data });
-}
-
-// --- Instagram, proxied through fastvidl.com (no official/public API, so we
-// forward the request server-side exactly like the reference Node script) ---
+// --- Instagram ---
 async function handleInstagram(url, res) {
   const upstreamRes = await fetch("https://fastvidl.com/api/lookup", {
     method: "POST",
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      Origin: "https://fastvidl.com",
-      Referer: "https://fastvidl.com/",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      Accept: "application/json", "Content-Type": "application/json",
+      Origin: "https://fastvidl.com", Referer: "https://fastvidl.com/",
     },
     body: JSON.stringify({ url }),
   });
 
   let json;
-  try {
-    json = await upstreamRes.json();
-  } catch (err) {
-    return res.status(502).json({ success: false, message: "Respons server Instagram tidak valid." });
-  }
+  try { json = await upstreamRes.json(); } catch (err) { return res.status(502).json({ success: false, message: "Respons server Instagram tidak valid." }); }
 
-  if (!json.ok) {
-    return res.status(200).json({
-      success: false,
-      message: json.message || "Gagal memproses tautan Instagram.",
-    });
-  }
-
-  const mediaList = json.media || [];
-  const selected = mediaList[0] || {};
-
+  if (!json.ok) return res.status(200).json({ success: false, message: json.message || "Gagal memproses tautan Instagram." });
+  
+  const selected = (json.media || [])[0] || {};
   const data = {
     platform: json.source || "instagram",
     downloadUrl: selected.url || json.url || "",
@@ -255,9 +236,6 @@ async function handleInstagram(url, res) {
     description: selected.label || "",
   };
 
-  if (!data.downloadUrl) {
-    return res.status(200).json({ success: false, message: "Media tidak ditemukan untuk tautan ini." });
-  }
-
+  if (!data.downloadUrl) return res.status(200).json({ success: false, message: "Media tidak ditemukan untuk tautan ini." });
   return res.status(200).json({ success: true, data });
 }
