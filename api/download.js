@@ -18,6 +18,8 @@ const INUUTYZ_PATHS = {
   douyin: "douyin",
   twitter: "twitter",
   capcut: "capcut",
+  gdrive: "gdrive",
+  mediafire: "mediafire",
 };
 
 // SnackVideo is served by a different provider than the rest — cuki.biz.id,
@@ -25,8 +27,14 @@ const INUUTYZ_PATHS = {
 const CUKI_BASE = "https://api.cuki.biz.id/api/downloader";
 const CUKI_API_KEY = "cuki-x";
 
-// YouTube is served by keyrafara.com.
-const KEYRAFARA_BASE = "https://keyrafara.com/downloaders/youtube";
+// YouTube, Facebook, and Spotify are all served by keyrafara.com, each with
+// its own response shape — YouTube gets its own handler (see handleYoutube),
+// Facebook and Spotify share a generic one (see handleKeyrafara below).
+const KEYRAFARA_BASE = "https://keyrafara.com/downloaders";
+const KEYRAFARA_PATHS = {
+  facebook: "facebook",
+  spotify: "spotify",
+};
 
 export default async function handler(req, res) {
   const { platform, url } = req.query;
@@ -42,6 +50,10 @@ export default async function handler(req, res) {
 
     if (platform === "youtube") {
       return await handleYoutube(url, res);
+    }
+
+    if (KEYRAFARA_PATHS[platform]) {
+      return await handleKeyrafara(platform, url, res);
     }
 
     if (platform === "snackvideo") {
@@ -128,7 +140,7 @@ async function handleSnackVideo(url, res) {
 // preferring mp4 for broader compatibility, and keep audio-only options
 // as-is since there are only a handful. ---
 async function handleYoutube(url, res) {
-  const upstreamUrl = `${KEYRAFARA_BASE}?url=${encodeURIComponent(url)}`;
+  const upstreamUrl = `${KEYRAFARA_BASE}/youtube?url=${encodeURIComponent(url)}`;
 
   const upstreamRes = await fetch(upstreamUrl, {
     headers: { Accept: "application/json" },
@@ -198,6 +210,82 @@ async function handleYoutube(url, res) {
       medias,
     },
   });
+}
+
+// --- Facebook & Spotify, both served by keyrafara.com with the same
+// { status, result } envelope, but different payload shapes — shaped here
+// so the frontend gets the same consistent { title, thumbnail, ..., medias[] }
+// contract as every other platform. ---
+async function handleKeyrafara(platform, url, res) {
+  const upstreamUrl = `${KEYRAFARA_BASE}/${KEYRAFARA_PATHS[platform]}?url=${encodeURIComponent(url)}`;
+
+  const upstreamRes = await fetch(upstreamUrl, {
+    headers: { Accept: "application/json" },
+  });
+
+  if (!upstreamRes.ok) {
+    return res.status(502).json({
+      success: false,
+      message: `Server sumber merespons dengan status ${upstreamRes.status}.`,
+    });
+  }
+
+  const json = await upstreamRes.json();
+
+  if (!json.status || !json.result) {
+    return res.status(200).json({
+      success: false,
+      message: json.message || "Tautan tidak valid atau konten tidak ditemukan.",
+    });
+  }
+
+  const data = platform === "facebook" ? shapeFacebook(json.result) : shapeSpotify(json.result);
+  return res.status(200).json({ success: true, data });
+}
+
+function shapeFacebook(result) {
+  const medias = (result.result || []).map((item) => ({
+    type: item.type === "m4a" ? "audio" : "video",
+    url: item.url,
+    // e.g. "HD (1.8MB)" — keyrafara gives size as a pre-formatted string
+    // ("1.8MB"), not bytes, so it's folded into the label instead of data_size.
+    quality: item.quality ? `${item.quality} (${item.size})` : item.size || "Original",
+    extension: item.type,
+    data_size: null,
+  }));
+
+  return {
+    title: "Video Facebook",
+    thumbnail: null,
+    author: null,
+    source: "facebook",
+    duration: null,
+    statistics: null,
+    medias,
+  };
+}
+
+function shapeSpotify(result) {
+  return {
+    title: result.title || "Tanpa judul",
+    thumbnail: result.thumbnail || null,
+    author: result.artist || null,
+    source: "spotify",
+    duration: parseMinSecToSeconds(result.duration),
+    statistics: null,
+    medias: result.url
+      ? [{ type: "audio", url: result.url, quality: "Original", extension: "mp3", data_size: null }]
+      : [],
+  };
+}
+
+// Turns "4:11" into 251 (seconds). Spotify's duration arrives pre-formatted
+// as M:SS instead of raw seconds.
+function parseMinSecToSeconds(text) {
+  if (!text || typeof text !== "string") return null;
+  const parts = text.split(":").map((n) => parseInt(n, 10));
+  if (parts.some(Number.isNaN)) return null;
+  return parts.reduce((acc, val) => acc * 60 + val, 0);
 }
 
 // --- Instagram, proxied through fastvidl.com (no official/public API, so we
