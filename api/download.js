@@ -19,12 +19,16 @@ const INUUTYZ_BASE = "https://api.inuutyz.web.id/api/download";
 
 // Maps our internal `platform` query param to the upstream inuutyz path.
 const INUUTYZ_PATHS = {
-  snackvideo: "snackvideo",
   tiktok_v2: "tiktok_v2",
   douyin: "douyin",
   twitter: "twitter",
   capcut: "capcut",
 };
+
+// SnackVideo is served by a different provider than the rest — cuki.biz.id,
+// which requires an apikey query param.
+const CUKI_BASE = "https://api.cuki.biz.id/api/downloader";
+const CUKI_API_KEY = "cuki-x";
 
 export default async function handler(req, res) {
   const { platform, url } = req.query;
@@ -40,6 +44,10 @@ export default async function handler(req, res) {
 
     if (platform === "youtube") {
       return await handleYoutube(url, res);
+    }
+
+    if (platform === "snackvideo") {
+      return await handleSnackVideo(url, res);
     }
 
     if (INUUTYZ_PATHS[platform]) {
@@ -88,6 +96,33 @@ async function handleInuutyz(platform, url, res) {
   }
 
   return res.status(200).json({ success: true, data: payload });
+}
+
+// --- SnackVideo, served by cuki.biz.id (separate provider + apikey) ---
+async function handleSnackVideo(url, res) {
+  const upstreamUrl = `${CUKI_BASE}/snackVideo?apikey=${CUKI_API_KEY}&url=${encodeURIComponent(url)}`;
+
+  const upstreamRes = await fetch(upstreamUrl, {
+    headers: { Accept: "application/json" },
+  });
+
+  if (!upstreamRes.ok) {
+    return res.status(502).json({
+      success: false,
+      message: `Server sumber merespons dengan status ${upstreamRes.status}.`,
+    });
+  }
+
+  const json = await upstreamRes.json();
+
+  if (!json.success || !json.data) {
+    return res.status(200).json({
+      success: false,
+      message: json.message || "Tautan SnackVideo tidak valid atau video tidak ditemukan.",
+    });
+  }
+
+  return res.status(200).json({ success: true, data: json.data });
 }
 
 // --- YouTube, resolved directly with ytdl-core (no third-party site, no
