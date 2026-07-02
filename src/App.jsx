@@ -503,8 +503,9 @@ export default function TarikApp() {
             Download hasilnya.
           </h1>
           <p className="text-[var(--slate)] text-base sm:text-lg mt-4 leading-relaxed">
-            YouTube, Instagram, TikTok, Douyin, X/Twitter, CapCut, sampai
-            SnackVideo — semua lewat satu kotak, tanpa watermark.
+            YouTube, Instagram, TikTok, Facebook, Douyin, X/Twitter, CapCut,
+            SnackVideo, Spotify, Google Drive, sampai MediaFire — semua lewat
+            satu kotak, tanpa watermark.
           </p>
         </div>
 
@@ -609,6 +610,7 @@ export default function TarikApp() {
             <MediaGroup title="Video" items={videos} />
             <MediaGroup title="Audio" items={audios} />
             <MediaGroup title="Gambar" items={images} />
+            <MediaGroup title="Berkas" items={files} />
           </div>
         )}
       </section>
