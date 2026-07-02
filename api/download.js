@@ -1,7 +1,12 @@
 // api/download.js
 import { gotScraping } from 'got-scraping';
-import { CookieJar } from 'tough-cookie';
-import readline from 'readline';
+
+/**
+ * ═══════════════════════════════════════════════════════════
+ * YTDL — YOUTUBE DOWNLOADER WRAPPER FOR VERCEL
+ * Base: vidssave.com (Scraper Logic by DEFAN)
+ * ═══════════════════════════════════════════════════════════
+ */
 
 const INUUTYZ_BASE = "https://api.inuutyz.web.id/api/download";
 const INUUTYZ_PATHS = {
@@ -13,6 +18,12 @@ const INUUTYZ_PATHS = {
 
 const CUKI_BASE = "https://api.cuki.biz.id/api/downloader";
 const CUKI_API_KEY = "cuki-x";
+
+const YTDL_CONFIG = {
+  apiUrl: 'https://api.vidssave.com/api/contentsite_api/media/parse',
+  websiteUrl: 'https://vidssave.com',
+  domain: 'api-ak.vidssave.com',
+};
 
 export default async function handler(req, res) {
   const { platform, url } = req.query;
@@ -26,7 +37,7 @@ export default async function handler(req, res) {
       return await handleInstagram(url, res);
     }
     if (platform === "youtube") {
-      return await handleYoutubeScraper(url, res);
+      return await handleYoutubeNewScraper(url, res);
     }
     if (platform === "snackvideo") {
       return await handleSnackVideo(url, res);
@@ -46,108 +57,139 @@ export default async function handler(req, res) {
 }
 
 // ==========================================
-// 1. YOUTUBE SCRAPER (Snapscooper)
+// NEW YOUTUBE SCRAPER (Base: Vidssave)
 // ==========================================
-async function handleYoutubeScraper(youtubeUrl, res) {
-  const cookieJar = new CookieJar();
-  const baseHeaders = {
-    'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36',
-    'accept': 'application/json',
-    'origin': 'https://snapscooper.com',
-    'referer': 'https://snapscooper.com/tools/youtube',
-  };
-
-  const client = gotScraping.extend({ cookieJar, headers: baseHeaders, http2: true });
+async function handleYoutubeNewScraper(youtubeUrl, res) {
+  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    const bypassApiUrl = 'https://zchat-1-zar-cfbypass.hf.space/solve?sitekey=0x4AAAAAADE4A2vZ35_4vI54&url=https://snapscooper.com';
-    const responseBypass = await gotScraping.get(bypassApiUrl).json();
-    
-    if (!responseBypass.success) {
-      return res.status(200).json({ success: false, message: "Gagal menembus proteksi keamanan upstream." });
+    // 1. Ekstrak Auth Token dari Vidssave HTML
+    const htmlResponse = await gotScraping.get(YTDL_CONFIG.websiteUrl, {
+      headers: {
+        'User-Agent': userAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    }).text();
+
+    const patterns = [
+      /auth['":\s]+['"](\d{8}[a-z]{7})['"]/i,
+      /auth\s*=\s*['"](\d{8}[a-z]{7})['"]/i,
+      /['"]auth['"]\s*:\s*['"](\d{8}[a-z]{7})['"]/i,
+      /data-auth=['"](\d{8}[a-z]{7})['"]/i,
+      /var\s+auth\s*=\s*['"](\d{8}[a-z]{7})['"]/i
+    ];
+
+    let authToken = null;
+    for (const pattern of patterns) {
+      const match = htmlResponse.match(pattern);
+      if (match && match[1]) {
+        authToken = match[1];
+        break;
+      }
     }
-    
-    const turnstileToken = responseBypass.token;
-    await client.post('https://snapscooper.com/cdn-cgi/challenge-platform/h/g/c/a1498ca01d39fdce', {
-      json: { secondaryToken: turnstileToken, sitekey: '0x4AAAAAADE4A2vZ35_4vI54' }
-    });
-    await client.post('https://snapscooper.com/api/token/request', { json: { ct: turnstileToken } });
 
-    const resStep4 = await client.post('https://snapscooper.com/api/tool/post-info', {
-      json: { toolId: 'youtube', url: youtubeUrl, highres: false }
-    }).json();
-
-    if (!resStep4 || !resStep4.contents || !resStep4.contents[0]) {
-      return res.status(200).json({ success: false, message: "Video tidak ditemukan atau link tidak valid." });
-    }
-
-    const mediaData = resStep4.contents[0];
-    const allMedias = [];
-
-    const processSingleItem = async (items, typeLabel) => {
-      if (!items || items.length === 0) return [];
-      const item = items[0]; 
-      let finalUrl = item.url;
-      
-      if (item.is_render !== false) {
-        try {
-          const renderTriggerRes = await client.get(item.url).json();
-          if (renderTriggerRes.sseStatusUrl) {
-            const stream = client.stream(renderTriggerRes.sseStatusUrl);
-            const rl = readline.createInterface({ input: stream, terminal: false });
-            
-            for await (const line of rl) {
-              if (line.includes('"status":"done"')) {
-                const data = JSON.parse(line.replace('data: ', ''));
-                finalUrl = data.output.url;
-                stream.destroy();
+    // Jika gagal di HTML utama, coba cari di file JS internal mereka
+    if (!authToken) {
+      const jsFiles = htmlResponse.match(/src=['"]([^'"]*\.js[^'"]*)['"]/gi) || [];
+      for (const jsFile of jsFiles) {
+        const jsUrl = jsFile.match(/src=['"]([^'"]+)['"]/i)?.[1];
+        if (jsUrl) {
+          try {
+            const fullUrl = jsUrl.startsWith('http') ? jsUrl : `${YTDL_CONFIG.websiteUrl}${jsUrl}`;
+            const jsContent = await gotScraping.get(fullUrl, { headers: { 'User-Agent': userAgent } }).text();
+            for (const pattern of patterns) {
+              const match = jsContent.match(pattern);
+              if (match && match[1]) {
+                authToken = match[1];
                 break;
               }
             }
-          }
-        } catch (renderError) {
-          console.error(`[Render Error] Gagal memproses ${typeLabel}:`, renderError.message);
-          finalUrl = item.url; 
+            if (authToken) break;
+          } catch {}
         }
       }
-      return [{
-        type: typeLabel,
-        url: finalUrl,
-        quality: item.label || (typeLabel === 'audio' ? '128kbps' : 'Original'),
-        extension: typeLabel === 'audio' ? 'mp3' : 'mp4'
-      }];
-    };
-
-    const [videoResults, audioResults] = await Promise.all([
-      processSingleItem(mediaData.videos, 'video'),
-      processSingleItem(mediaData.audios, 'audio')
-    ]);
-
-    allMedias.push(...videoResults, ...audioResults);
-
-    if (allMedias.length === 0 && mediaData.videos?.[0]) {
-      allMedias.push({ type: 'video', url: mediaData.videos[0].url, quality: mediaData.videos[0].label || 'Default', extension: 'mp4' });
     }
+
+    if (!authToken) {
+      return res.status(200).json({ success: false, message: "Gagal mendapatkan kunci akses bypass YouTube." });
+    }
+
+    // 2. Kirim Request Parse ke Api Vidssave
+    const searchParams = new URLSearchParams({
+      auth: authToken,
+      domain: YTDL_CONFIG.domain,
+      origin: 'source',
+      link: youtubeUrl
+    });
+
+    const parseResponse = await gotScraping.post(YTDL_CONFIG.apiUrl, {
+      body: searchParams.toString(),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': userAgent,
+        'Origin': YTDL_CONFIG.websiteUrl,
+        'Referer': `${YTDL_CONFIG.websiteUrl}/`,
+        'Accept': 'application/json, text/plain, */*'
+      }
+    }).json();
+
+    if (!parseResponse || parseResponse.status !== 1 || !parseResponse.data) {
+      return res.status(200).json({ 
+        success: false, 
+        message: parseResponse.msg || parseResponse.message || "Gagal memproses video YouTube dari server baru." 
+      });
+    }
+
+    const rawData = parseResponse.data;
+    const mappedMedias = [];
+
+    // 3. Normalisasi data media agar pas dengan App.jsx Frontend
+    if (rawData.media && Array.isArray(rawData.media)) {
+      rawData.media.forEach(m => {
+        if ((m.type === 'video' || m.type === 'audio') && m.resources) {
+          m.resources.forEach(r => {
+            if (r.download_url) {
+              mappedMedias.push({
+                type: m.type,
+                url: r.download_url,
+                quality: r.quality || (m.type === 'audio' ? '128kbps' : 'Original'),
+                extension: (r.format || (m.type === 'audio' ? 'mp3' : 'mp4')).toLowerCase(),
+                data_size: r.size || null // Otomatis dihitung formatBytes() di frontend kamu
+              });
+            }
+          });
+        }
+      });
+    }
+
+    // Sort kualitas video dari yang paling tinggi
+    const videos = mappedMedias.filter(m => m.type === 'video').sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+    const audios = mappedMedias.filter(m => m.type === 'audio');
 
     return res.status(200).json({
       success: true,
       data: {
-        title: resStep4.title || "YouTube Video",
-        thumbnail: resStep4.thumbnail || null,
-        author: resStep4.author || null,
+        title: rawData.title || "YouTube Video",
+        thumbnail: rawData.thumbnail || null,
+        author: null,
         source: 'youtube',
-        medias: allMedias
+        duration: rawData.duration ? parseInt(rawData.duration, 10) : null,
+        statistics: {
+          digg_count: rawData.like_count || 0,
+          comment_count: rawData.comment_count || 0
+        },
+        medias: [...videos, ...audios]
       }
     });
 
   } catch (error) {
-    console.error("Scraper Crash Error:", error);
-    return res.status(200).json({ success: false, message: `Gagal memproses YouTube: ${error.message}` });
+    console.error('[-] New YouTube Scraper Error:', error.message);
+    return res.status(200).json({ success: false, message: `Terjadi kesalahan internal: ${error.message}` });
   }
 }
 
 // ==========================================
-// 2. TIKTOK, DOUYIN, TWITTER, CAPCUT (Inuutyz)
+// TIKTOK, DOUYIN, TWITTER, CAPCUT (Inuutyz)
 // ==========================================
 async function handleInuutyz(platform, url, res) {
   const upstreamPath = INUUTYZ_PATHS[platform];
@@ -164,7 +206,7 @@ async function handleInuutyz(platform, url, res) {
 }
 
 // ==========================================
-// 3. SNACKVIDEO (Cuki)
+// SNACKVIDEO (Cuki)
 // ==========================================
 async function handleSnackVideo(url, res) {
   const upstreamUrl = `${CUKI_BASE}/snackVideo?apikey=${CUKI_API_KEY}&url=${encodeURIComponent(url)}`;
@@ -178,7 +220,7 @@ async function handleSnackVideo(url, res) {
 }
 
 // ==========================================
-// 4. INSTAGRAM (Fastvidl)
+// INSTAGRAM (Fastvidl)
 // ==========================================
 async function handleInstagram(url, res) {
   const upstreamRes = await fetch("https://fastvidl.com/api/lookup", {
@@ -192,11 +234,7 @@ async function handleInstagram(url, res) {
   });
 
   let json;
-  try { 
-    json = await upstreamRes.json(); 
-  } catch (err) { 
-    return res.status(502).json({ success: false, message: "Respons server Instagram tidak valid." }); 
-  }
+  try { json = await upstreamRes.json(); } catch (err) { return res.status(502).json({ success: false, message: "Respons server Instagram tidak valid." }); }
 
   if (!json.ok) return res.status(200).json({ success: false, message: json.message || "Gagal memproses tautan Instagram." });
   
