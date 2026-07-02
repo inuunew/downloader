@@ -7,6 +7,7 @@ import {
   Music2,
   Video,
   Image as ImageIcon,
+  File as FileIcon,
   ExternalLink,
   Heart,
   MessageCircle,
@@ -153,6 +154,46 @@ function normalizeInstagram(data) {
   };
 }
 
+// Facebook & Spotify — already shaped server-side (see api/download.js), so
+// no reshaping needed here.
+function normalizeFacebook(data) {
+  return data;
+}
+
+function normalizeSpotify(data) {
+  return data;
+}
+
+// Google Drive — generic inuutyz payload, single file, no metadata beyond
+// name/links. Surfaced as a "file" media type (not video/audio/image).
+function normalizeGdrive(data) {
+  const ext = data.name?.split(".").pop()?.toUpperCase();
+  return {
+    title: data.name || "File Google Drive",
+    thumbnail: null,
+    author: null,
+    source: "gdrive",
+    duration: null,
+    statistics: null,
+    medias: data.download
+      ? [{ type: "file", url: data.download, quality: ext || "Unduh", extension: ext?.toLowerCase() }]
+      : [],
+  };
+}
+
+// MediaFire — even more minimal, just a direct link, no filename at all.
+function normalizeMediafire(data) {
+  return {
+    title: "File MediaFire",
+    thumbnail: null,
+    author: null,
+    source: "mediafire",
+    duration: null,
+    statistics: null,
+    medias: data.dl ? [{ type: "file", url: data.dl, quality: "Unduh", extension: null }] : [],
+  };
+}
+
 // YouTube — resolved server-side (see api/download.js), already returns data
 // in the exact shape this UI expects, so no reshaping needed here.
 function normalizeYoutube(data) {
@@ -207,6 +248,7 @@ function formatCount(value) {
 function mediaIcon(type) {
   if (type === "audio") return Music2;
   if (type === "image") return ImageIcon;
+  if (type === "file") return FileIcon;
   return Video;
 }
 
@@ -225,10 +267,14 @@ const PLATFORMS = [
   { id: "youtube", mono: "YT", label: "YouTube", placeholder: "https://youtube.com/shorts/...", queryPlatform: "youtube", normalize: normalizeYoutube },
   { id: "instagram", mono: "IG", label: "Instagram", placeholder: "https://instagram.com/p/...", queryPlatform: "instagram", normalize: normalizeInstagram },
   { id: "tiktok", mono: "TT", label: "TikTok", placeholder: "https://tiktok.com/@user/video/...", queryPlatform: "tiktok_v2", normalize: normalizeTikTok },
+  { id: "facebook", mono: "FB", label: "Facebook", placeholder: "https://facebook.com/share/r/...", queryPlatform: "facebook", normalize: normalizeFacebook },
   { id: "douyin", mono: "DY", label: "Douyin", placeholder: "https://douyin.com/video/...", queryPlatform: "douyin", normalize: normalizeDouyin },
   { id: "x", mono: "X", label: "X / Twitter", placeholder: "https://twitter.com/user/status/...", queryPlatform: "twitter", normalize: normalizeTwitter },
   { id: "capcut", mono: "CC", label: "CapCut", placeholder: "https://capcut.com/tv2/...", queryPlatform: "capcut", normalize: normalizeCapcut },
   { id: "snackvideo", mono: "SV", label: "SnackVideo", placeholder: "https://snackvideo.com/@user/video/...", queryPlatform: "snackvideo", normalize: normalizeSnackVideo },
+  { id: "spotify", mono: "SP", label: "Spotify", placeholder: "https://open.spotify.com/track/...", queryPlatform: "spotify", normalize: normalizeSpotify },
+  { id: "gdrive", mono: "GD", label: "Google Drive", placeholder: "https://drive.google.com/file/d/...", queryPlatform: "gdrive", normalize: normalizeGdrive },
+  { id: "mediafire", mono: "MF", label: "MediaFire", placeholder: "https://www.mediafire.com/file/...", queryPlatform: "mediafire", normalize: normalizeMediafire },
 ];
 
 // Dropdown picker for choosing the active platform. Replaces the old
@@ -355,6 +401,7 @@ export default function TarikApp() {
   const videos = medias.filter((m) => m.type === "video");
   const audios = medias.filter((m) => m.type === "audio");
   const images = medias.filter((m) => m.type === "image");
+  const files = medias.filter((m) => m.type === "file");
 
   return (
     <div className="tarik-root min-h-screen" style={{ background: "var(--paper)" }}>
