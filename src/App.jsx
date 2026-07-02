@@ -14,19 +14,149 @@ import {
   Zap,
 } from "lucide-react";
 
-// Titik akhir API untuk proxy backend
+// Points to our own Vercel serverless function (see /api/download.js),
+// which proxies each platform's upstream API server-side to avoid browser
+// CORS restrictions and to keep any API keys out of client-side code.
 const PROXY_ENDPOINT = "/api/download";
 
-const PLATFORMS = [
-  { id: "youtube", mono: "YT", label: "YouTube", placeholder: "https://youtube.com/shorts/..." },
-  { id: "instagram", mono: "IG", label: "Instagram", placeholder: "https://instagram.com/p/..." },
-  { id: "tiktok", mono: "TT", label: "TikTok", placeholder: "https://tiktok.com/@user/video/..." },
-  { id: "capcut", mono: "CC", label: "CapCut", placeholder: "https://capcut.com/tv2/..." },
-  { id: "douyin", mono: "DY", label: "Douyin", placeholder: "https://douyin.com/video/..." },
-  { id: "facebook", mono: "FB", label: "Facebook", placeholder: "https://facebook.com/reel/..." },
-  { id: "x", mono: "X", label: "X / Twitter", placeholder: "https://twitter.com/user/status/..." },
-  { id: "snackvideo", mono: "SV", label: "SnackVideo", placeholder: "https://snackvideo.com/@user/video/..." },
-];
+// --- Per-platform normalizers -----------------------------------------
+// Every upstream API returns a differently-shaped payload. Each normalize()
+// function below turns that raw payload into the single shape the rest of
+// the UI expects: { title, thumbnail, author, source, duration, statistics, medias[], description? }
+
+// SnackVideo
+function normalizeSnackVideo(data) {
+  return {
+    title: data.title || data.description || "Tanpa judul",
+    thumbnail: data.thumbnail,
+    author: data.creator?.name,
+    source: "snackvideo",
+    duration: parseDurationToSeconds(data.duration),
+    statistics: {
+      digg_count: data.interaction?.likes,
+      share_count: data.interaction?.shares,
+    },
+    medias: data.videoUrl
+      ? [{ type: "video", url: data.videoUrl, quality: "Original", extension: "mp4" }]
+      : [],
+  };
+}
+
+// TikTok (tiktok_v2) — counts arrive pre-formatted as strings like "156.9K"
+// instead of raw numbers, and duration arrives in milliseconds as a string.
+function normalizeTikTok(data) {
+  return {
+    title: data.text || "Tanpa judul",
+    thumbnail: data.cover_link,
+    author: data.author_nickname,
+    source: "tiktok",
+    duration: parseInt(data.duration, 10) || null,
+    statistics: {
+      digg_count: data.like_count,
+      comment_count: data.comment_count,
+      share_count: data.share_count,
+    },
+    medias: [
+      data.no_watermark_link_hd || data.no_watermark_link
+        ? {
+            type: "video",
+            url: data.no_watermark_link_hd || data.no_watermark_link,
+            quality: "Tanpa watermark",
+            extension: "mp4",
+          }
+        : null,
+      data.watermark_link
+        ? { type: "video", url: data.watermark_link, quality: "Dengan watermark", extension: "mp4" }
+        : null,
+      data.music_link
+        ? { type: "audio", url: data.music_link, quality: "Musik original", extension: "mp3" }
+        : null,
+    ].filter(Boolean),
+  };
+}
+
+// Douyin — no author/statistics/duration, just a title/thumbnail and a flat
+// list of "Server N" download links (mixed video/audio, source doesn't tell
+// us which is which beyond the label).
+function normalizeDouyin(data) {
+  const downloads = data.downloads || [];
+  return {
+    title: data.title || "Tanpa judul",
+    thumbnail: data.thumbnail,
+    author: null,
+    source: "douyin",
+    duration: null,
+    statistics: null,
+    medias: downloads.map((d) => ({
+      type: "video",
+      url: d.url,
+      quality: d.quality || "Server",
+      extension: "mp4",
+    })),
+  };
+}
+
+// X / Twitter — single video link only, no quality options, no statistics.
+// The API splits title and caption into separate fields.
+function normalizeTwitter(data) {
+  return {
+    title: data.videoTitle || "Tanpa judul",
+    description: data.videoDescription || null,
+    thumbnail: data.imgUrl,
+    author: null,
+    source: "x",
+    duration: null,
+    statistics: null,
+    medias: data.downloadLink
+      ? [{ type: "video", url: data.downloadLink, quality: "Original", extension: "mp4" }]
+      : [],
+  };
+}
+
+// CapCut — single video link, no statistics.
+function normalizeCapcut(data) {
+  return {
+    title: data.title || "Tanpa judul",
+    thumbnail: data.coverUrl,
+    author: data.authorName,
+    source: "capcut",
+    duration: null,
+    statistics: null,
+    medias: data.originalVideoUrl
+      ? [{ type: "video", url: data.originalVideoUrl, quality: "Original", extension: "mp4" }]
+      : [],
+  };
+}
+
+// Instagram — proxied server-side through fastvidl.com (see api/download.js).
+// Only ever returns a single media item, no author/statistics.
+function normalizeInstagram(data) {
+  return {
+    title: data.description || "Tanpa judul",
+    thumbnail: data.preview,
+    author: null,
+    source: data.platform || "instagram",
+    duration: null,
+    statistics: null,
+    medias: data.downloadUrl
+      ? [
+          {
+            type: data.mediaType === "image" ? "image" : "video",
+            url: data.downloadUrl,
+            quality: data.quality || "HD",
+            extension: data.mediaType === "image" ? "jpg" : "mp4",
+          },
+        ]
+      : [],
+  };
+}
+
+// YouTube — resolved server-side with ytdl-core (see api/download.js), which
+// already returns data in the exact shape this UI expects, so no reshaping
+// needed here.
+function normalizeYoutube(data) {
+  return data;
+}
 
 function formatBytes(bytes) {
   if (!bytes || Number.isNaN(bytes)) return null;
@@ -50,6 +180,7 @@ function formatDuration(raw) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+// Turns strings like "2 minutes 36 seconds" or "1 hour 4 minutes" into seconds.
 function parseDurationToSeconds(text) {
   if (!text) return null;
   if (typeof text === "number") return text;
@@ -63,89 +194,13 @@ function parseDurationToSeconds(text) {
   return total > 0 ? total : null;
 }
 
-// -------------------------------------------------------------
-// [JANGAN DIUBAH]: Normalisasi khusus SnackVideo sesuai pesanan
-// -------------------------------------------------------------
-function normalizeSnackVideo(data) {
-  return {
-    title: data.title || data.description || "Tanpa judul",
-    thumbnail: data.thumbnail,
-    author: data.creator?.name,
-    source: "snackvideo",
-    duration: parseDurationToSeconds(data.duration),
-    statistics: {
-      digg_count: data.interaction?.likes,
-      share_count: data.interaction?.shares,
-    },
-    medias: data.videoUrl
-      ? [
-          {
-            type: "video",
-            url: data.videoUrl,
-            quality: "Original",
-            extension: "mp4",
-          },
-        ]
-      : [],
-  };
-}
-
-// -------------------------------------------------------------
-// [BARU]: Normalisasi untuk hasil Scrape Vidssave agar cocok dengan UI
-// -------------------------------------------------------------
-function normalizeVidssave(data) {
-  const medias = [];
-
-  if (data.videos && Array.isArray(data.videos)) {
-    data.videos.forEach((v) => {
-      medias.push({
-        type: "video",
-        url: v.download_url,
-        quality: v.quality,
-        extension: v.format,
-        data_size: v.size,
-      });
-    });
-  }
-
-  if (data.audios && Array.isArray(data.audios)) {
-    data.audios.forEach((a) => {
-      medias.push({
-        type: "audio",
-        url: a.download_url,
-        quality: a.quality,
-        extension: a.format,
-        data_size: a.size,
-      });
-    });
-  }
-
-  // Jika ada gambar (misal dari postingan Instagram/TikTok carousel)
-  // Vidssave biasanya menyimpannya di format tertentu, tapi kita filter jaga-jaga
-  if (data.images && Array.isArray(data.images)) {
-    data.images.forEach((img) => {
-      medias.push({
-        type: "image",
-        url: img.download_url,
-        quality: "HD",
-        extension: img.format || "jpg",
-        data_size: img.size,
-      });
-    });
-  }
-
-  return {
-    title: data.title || "Tanpa judul",
-    thumbnail: data.thumbnail,
-    author: "NuuDown API", // Vidssave kadang tidak membalas nama author
-    source: "Vidssave",
-    duration: parseDurationToSeconds(data.duration),
-    statistics: {
-      digg_count: data.like_count,
-      comment_count: data.comment_count,
-    },
-    medias: medias,
-  };
+// Statistics can arrive as raw numbers (SnackVideo) or already-formatted
+// strings like "156.9K" (TikTok) — format only if it's a number, otherwise
+// pass the string straight through.
+function formatCount(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "number") return value.toLocaleString("id-ID");
+  return value;
 }
 
 function mediaIcon(type) {
@@ -164,6 +219,16 @@ function PillIcon({ mono }) {
     </span>
   );
 }
+
+const PLATFORMS = [
+  { id: "youtube", mono: "YT", label: "YouTube", placeholder: "https://youtube.com/shorts/...", queryPlatform: "youtube", normalize: normalizeYoutube },
+  { id: "instagram", mono: "IG", label: "Instagram", placeholder: "https://instagram.com/p/...", queryPlatform: "instagram", normalize: normalizeInstagram },
+  { id: "tiktok", mono: "TT", label: "TikTok", placeholder: "https://tiktok.com/@user/video/...", queryPlatform: "tiktok_v2", normalize: normalizeTikTok },
+  { id: "douyin", mono: "DY", label: "Douyin", placeholder: "https://douyin.com/video/...", queryPlatform: "douyin", normalize: normalizeDouyin },
+  { id: "x", mono: "X", label: "X / Twitter", placeholder: "https://twitter.com/user/status/...", queryPlatform: "twitter", normalize: normalizeTwitter },
+  { id: "capcut", mono: "CC", label: "CapCut", placeholder: "https://capcut.com/tv2/...", queryPlatform: "capcut", normalize: normalizeCapcut },
+  { id: "snackvideo", mono: "SV", label: "SnackVideo", placeholder: "https://snackvideo.com/@user/video/...", queryPlatform: "snackvideo", normalize: normalizeSnackVideo },
+];
 
 export default function TarikApp() {
   const [activeIdx, setActiveIdx] = useState(0);
@@ -200,24 +265,15 @@ export default function TarikApp() {
     setResult(null);
     setLoading(true);
     try {
-      const isSnackVideo = active.id === "snackvideo";
-      const platformParam = isSnackVideo ? "snackvideo" : "vidssave"; // Disesuaikan
-      
       const res = await fetch(
-        `${PROXY_ENDPOINT}?platform=${platformParam}&url=${encodeURIComponent(url.trim())}`
+        `${PROXY_ENDPOINT}?platform=${active.queryPlatform}&url=${encodeURIComponent(url.trim())}`
       );
-      
       if (!res.ok) throw new Error(`Server merespons dengan status ${res.status}`);
       const json = await res.json();
-      
-      if (!json.success) {
-        throw new Error(json.error || json.message || "Tautan tidak bisa diproses. Cek lagi linknya.");
+      if (!json.success || !json.data) {
+        throw new Error(json.message || "Tautan tidak bisa diproses. Cek lagi linknya.");
       }
-
-      // Normalisasi data yang masuk ke format UI
-      const normalized = isSnackVideo ? normalizeSnackVideo(json.data) : normalizeVidssave(json);
-      setResult(normalized);
-
+      setResult(active.normalize(json.data));
     } catch (err) {
       setError(
         err.message === "Failed to fetch"
@@ -360,7 +416,7 @@ export default function TarikApp() {
             Download hasilnya.
           </h1>
           <p className="text-[var(--slate)] text-base sm:text-lg mt-4 leading-relaxed">
-            YouTube, Instagram, TikTok, CapCut, Douyin, Facebook, X, sampai
+            YouTube, Instagram, TikTok, Douyin, X/Twitter, CapCut, sampai
             SnackVideo — semua lewat satu kotak, tanpa watermark.
           </p>
         </div>
@@ -463,21 +519,26 @@ export default function TarikApp() {
                 {result.author && (
                   <p className="text-sm text-[var(--slate)] mt-1">oleh {result.author}</p>
                 )}
+                {result.description && (
+                  <p className="text-sm text-[var(--slate)] mt-2 leading-relaxed line-clamp-3 whitespace-pre-line">
+                    {result.description}
+                  </p>
+                )}
                 {result.statistics && (
                   <div className="flex items-center gap-4 mt-3 text-xs text-[var(--slate)]">
-                    {typeof result.statistics.digg_count === "number" && (
+                    {formatCount(result.statistics.digg_count) != null && (
                       <span className="flex items-center gap-1">
-                        <Heart size={13} /> {result.statistics.digg_count.toLocaleString("id-ID")}
+                        <Heart size={13} /> {formatCount(result.statistics.digg_count)}
                       </span>
                     )}
-                    {typeof result.statistics.comment_count === "number" && (
+                    {formatCount(result.statistics.comment_count) != null && (
                       <span className="flex items-center gap-1">
-                        <MessageCircle size={13} /> {result.statistics.comment_count.toLocaleString("id-ID")}
+                        <MessageCircle size={13} /> {formatCount(result.statistics.comment_count)}
                       </span>
                     )}
-                    {typeof result.statistics.share_count === "number" && (
+                    {formatCount(result.statistics.share_count) != null && (
                       <span className="flex items-center gap-1">
-                        <Repeat2 size={13} /> {result.statistics.share_count.toLocaleString("id-ID")}
+                        <Repeat2 size={13} /> {formatCount(result.statistics.share_count)}
                       </span>
                     )}
                   </div>
