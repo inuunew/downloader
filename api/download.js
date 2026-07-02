@@ -1,10 +1,9 @@
-// api/download.js
 import { gotScraping } from 'got-scraping';
 
 /**
  * ═══════════════════════════════════════════════════════════
- * YTDL — YOUTUBE DOWNLOADER WRAPPER FOR VERCEL
- * Base: vidssave.com (Scraper Logic by DEFAN)
+ * YTDL — MULTI DOWNLOADER WRAPPER FOR VERCEL
+ * Updated with ytdown.to Proxy & IP Spoofing for YouTube
  * ═══════════════════════════════════════════════════════════
  */
 
@@ -19,11 +18,21 @@ const INUUTYZ_PATHS = {
 const CUKI_BASE = "https://api.cuki.biz.id/api/downloader";
 const CUKI_API_KEY = "cuki-x";
 
-const YTDL_CONFIG = {
-  apiUrl: 'https://api.vidssave.com/api/contentsite_api/media/parse',
-  websiteUrl: 'https://vidssave.com',
-  domain: 'api-ak.vidssave.com',
-};
+// Fungsi pembantu untuk membuat IP palsu guna menghindari block/rate-limit
+function generateRandomIP() {
+    const ranges = [
+        [1, 1], [2, 2], [5, 5], [23, 23], [27, 27], [31, 31], [36, 36], [37, 37], [39, 39], [42, 42],
+        [46, 46], [49, 49], [50, 50], [60, 60], [114, 114], [117, 117], [118, 118], [119, 119], [120, 120],
+        [121, 121], [122, 122], [123, 123], [124, 124], [125, 125], [126, 126], [180, 180], [182, 182], [183, 183]
+    ];
+    const range = ranges[Math.floor(Math.random() * ranges.length)];
+    return [
+        range[0],
+        Math.floor(Math.random() * 256),
+        Math.floor(Math.random() * 256),
+        Math.floor(Math.random() * 256)
+    ].join('.');
+}
 
 export default async function handler(req, res) {
   const { platform, url } = req.query;
@@ -57,133 +66,101 @@ export default async function handler(req, res) {
 }
 
 // ==========================================
-// NEW YOUTUBE SCRAPER (Base: Vidssave)
+// NEW YOUTUBE SCRAPER (Base: ytdown.to Proxy)
 // ==========================================
 async function handleYoutubeNewScraper(youtubeUrl, res) {
-  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  const PROXY_API = 'https://app.ytdown.to/proxy.php';
+  const spoofedIp = generateRandomIP();
 
   try {
-    // 1. Ekstrak Auth Token dari Vidssave HTML
-    const htmlResponse = await gotScraping.get(YTDL_CONFIG.websiteUrl, {
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
-    }).text();
+    const headers = {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'X-Forwarded-For': spoofedIp,
+      'X-Real-IP': spoofedIp,
+      'Client-IP': spoofedIp,
+      'True-Client-IP': spoofedIp,
+      'X-Originating-IP': spoofedIp,
+      'X-Cluster-Client-IP': spoofedIp,
+      'Forwarded': `for=${spoofedIp}`,
+      'Accept': '*/*',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Referer': 'https://ytdown.to/'
+    };
 
-    const patterns = [
-      /auth['":\s]+['"](\d{8}[a-z]{7})['"]/i,
-      /auth\s*=\s*['"](\d{8}[a-z]{7})['"]/i,
-      /['"]auth['"]\s*:\s*['"](\d{8}[a-z]{7})['"]/i,
-      /data-auth=['"](\d{8}[a-z]{7})['"]/i,
-      /var\s+auth\s*=\s*['"](\d{8}[a-z]{7})['"]/i
-    ];
+    const body = new URLSearchParams();
+    body.append('url', youtubeUrl);
 
-    let authToken = null;
-    for (const pattern of patterns) {
-      const match = htmlResponse.match(pattern);
-      if (match && match[1]) {
-        authToken = match[1];
-        break;
-      }
-    }
-
-    // Jika gagal di HTML utama, coba cari di file JS internal mereka
-    if (!authToken) {
-      const jsFiles = htmlResponse.match(/src=['"]([^'"]*\.js[^'"]*)['"]/gi) || [];
-      for (const jsFile of jsFiles) {
-        const jsUrl = jsFile.match(/src=['"]([^'"]+)['"]/i)?.[1];
-        if (jsUrl) {
-          try {
-            const fullUrl = jsUrl.startsWith('http') ? jsUrl : `${YTDL_CONFIG.websiteUrl}${jsUrl}`;
-            const jsContent = await gotScraping.get(fullUrl, { headers: { 'User-Agent': userAgent } }).text();
-            for (const pattern of patterns) {
-              const match = jsContent.match(pattern);
-              if (match && match[1]) {
-                authToken = match[1];
-                break;
-              }
-            }
-            if (authToken) break;
-          } catch {}
-        }
-      }
-    }
-
-    if (!authToken) {
-      return res.status(200).json({ success: false, message: "Gagal mendapatkan kunci akses bypass YouTube." });
-    }
-
-    // 2. Kirim Request Parse ke Api Vidssave
-    const searchParams = new URLSearchParams({
-      auth: authToken,
-      domain: YTDL_CONFIG.domain,
-      origin: 'source',
-      link: youtubeUrl
+    // Menggunakan fetch bawaan Node.js (Vercel) untuk menembak proxy target
+    const response = await fetch(PROXY_API, {
+      method: "POST",
+      headers,
+      body: body.toString(),
     });
 
-    const parseResponse = await gotScraping.post(YTDL_CONFIG.apiUrl, {
-      body: searchParams.toString(),
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': userAgent,
-        'Origin': YTDL_CONFIG.websiteUrl,
-        'Referer': `${YTDL_CONFIG.websiteUrl}/`,
-        'Accept': 'application/json, text/plain, */*'
-      }
-    }).json();
+    if (!response.ok) {
+      return res.status(502).json({ 
+        success: false, 
+        message: `Server ytdown merespons dengan kode status ${response.status}` 
+      });
+    }
 
-    if (!parseResponse || parseResponse.status !== 1 || !parseResponse.data) {
+    const rawText = await response.text();
+    let parsedData;
+
+    try {
+      parsedData = JSON.parse(rawText);
+    } catch (e) {
       return res.status(200).json({ 
         success: false, 
-        message: parseResponse.msg || parseResponse.message || "Gagal memproses video YouTube dari server baru." 
+        message: "Gagal memproses struktur data dari server bypass.", 
+        debug: rawText 
       });
     }
 
-    const rawData = parseResponse.data;
+    if (parsedData.status === false || parsedData.error) {
+      return res.status(200).json({ 
+        success: false, 
+        message: parsedData.error || "Gagal mengambil data video YouTube." 
+      });
+    }
+
+    // 💡 NORMALISASI DATA (Sesuaikan properti ini jika struktur links dari ytdown berbeda)
     const mappedMedias = [];
-
-    // 3. Normalisasi data media agar pas dengan App.jsx Frontend
-    if (rawData.media && Array.isArray(rawData.media)) {
-      rawData.media.forEach(m => {
-        if ((m.type === 'video' || m.type === 'audio') && m.resources) {
-          m.resources.forEach(r => {
-            if (r.download_url) {
-              mappedMedias.push({
-                type: m.type,
-                url: r.download_url,
-                quality: r.quality || (m.type === 'audio' ? '128kbps' : 'Original'),
-                extension: (r.format || (m.type === 'audio' ? 'mp3' : 'mp4')).toLowerCase(),
-                data_size: r.size || null // Otomatis dihitung formatBytes() di frontend kamu
-              });
-            }
-          });
-        }
+    
+    // Asumsi ytdown mengembalikan array media di properti `links` atau `media`
+    const rawMedias = parsedData.links || parsedData.media || [];
+    
+    if (Array.isArray(rawMedias)) {
+      rawMedias.forEach(m => {
+        mappedMedias.push({
+          type: m.type || 'video', // 'video' atau 'audio'
+          url: m.url || m.download_url,
+          quality: m.quality || 'Original',
+          extension: m.extension || m.format || 'mp4',
+          data_size: m.size || m.data_size || null
+        });
       });
     }
-
-    // Sort kualitas video dari yang paling tinggi
-    const videos = mappedMedias.filter(m => m.type === 'video').sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
-    const audios = mappedMedias.filter(m => m.type === 'audio');
 
     return res.status(200).json({
       success: true,
       data: {
-        title: rawData.title || "YouTube Video",
-        thumbnail: rawData.thumbnail || null,
-        author: null,
+        title: parsedData.title || "YouTube Video",
+        thumbnail: parsedData.thumbnail || parsedData.cover || null,
+        author: parsedData.author || null,
         source: 'youtube',
-        duration: rawData.duration ? parseInt(rawData.duration, 10) : null,
+        duration: parsedData.duration || null,
         statistics: {
-          digg_count: rawData.like_count || 0,
-          comment_count: rawData.comment_count || 0
+          digg_count: parsedData.likes || 0,
+          comment_count: 0
         },
-        medias: [...videos, ...audios]
+        medias: mappedMedias
       }
     });
 
   } catch (error) {
-    console.error('[-] New YouTube Scraper Error:', error.message);
+    console.error('[-] ytdown Proxy Error:', error.message);
     return res.status(200).json({ success: false, message: `Terjadi kesalahan internal: ${error.message}` });
   }
 }
