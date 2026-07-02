@@ -27,13 +27,12 @@ const INUUTYZ_PATHS = {
 const CUKI_BASE = "https://api.cuki.biz.id/api/downloader";
 const CUKI_API_KEY = "cuki-x";
 
-// YouTube, Facebook, and Spotify are all served by keyrafara.com, each with
-// its own response shape — YouTube gets its own handler (see handleYoutube),
-// Facebook and Spotify share a generic one (see handleKeyrafara below).
+// YouTube and Facebook are served by keyrafara.com, each with its own
+// response shape — YouTube gets its own handler (see handleYoutube),
+// Facebook has a generic-ish one (see handleKeyrafara below).
 const KEYRAFARA_BASE = "https://keyrafara.com/downloaders";
 const KEYRAFARA_PATHS = {
   facebook: "facebook",
-  spotify: "spotify",
 };
 
 export default async function handler(req, res) {
@@ -54,6 +53,10 @@ export default async function handler(req, res) {
 
     if (KEYRAFARA_PATHS[platform]) {
       return await handleKeyrafara(platform, url, res);
+    }
+
+    if (platform === "spotify") {
+      return await handleSpotify(url, res);
     }
 
     if (platform === "snackvideo") {
@@ -212,10 +215,9 @@ async function handleYoutube(url, res) {
   });
 }
 
-// --- Facebook & Spotify, both served by keyrafara.com with the same
-// { status, result } envelope, but different payload shapes — shaped here
-// so the frontend gets the same consistent { title, thumbnail, ..., medias[] }
-// contract as every other platform. ---
+// --- Facebook, served by keyrafara.com with a { status, result } envelope —
+// shaped here so the frontend gets the same consistent
+// { title, thumbnail, ..., medias[] } contract as every other platform. ---
 async function handleKeyrafara(platform, url, res) {
   const upstreamUrl = `${KEYRAFARA_BASE}/${KEYRAFARA_PATHS[platform]}?url=${encodeURIComponent(url)}`;
 
@@ -239,8 +241,7 @@ async function handleKeyrafara(platform, url, res) {
     });
   }
 
-  const data = platform === "facebook" ? shapeFacebook(json.result) : shapeSpotify(json.result);
-  return res.status(200).json({ success: true, data });
+  return res.status(200).json({ success: true, data: shapeFacebook(json.result) });
 }
 
 function shapeFacebook(result) {
@@ -265,27 +266,67 @@ function shapeFacebook(result) {
   };
 }
 
-function shapeSpotify(result) {
-  return {
-    title: result.title || "Tanpa judul",
-    thumbnail: result.thumbnail || null,
-    author: result.artist || null,
-    source: "spotify",
-    duration: parseMinSecToSeconds(result.duration),
-    statistics: null,
-    medias: result.url
-      ? [{ type: "audio", url: result.url, quality: "Original", extension: "mp3", data_size: null }]
-      : [],
-  };
+// --- Spotify, served by inuutyz. Nested one level deeper than the other
+// inuutyz platforms (result.result, not just result), so it needs its own
+// handler instead of going through the generic handleInuutyz. Duration isn't
+// a top-level field — it's embedded as a `duration` query param on the
+// download URL itself, in seconds. ---
+async function handleSpotify(url, res) {
+  const upstreamUrl = `${INUUTYZ_BASE}/spotify?url=${encodeURIComponent(url)}`;
+
+  const upstreamRes = await fetch(upstreamUrl, {
+    headers: { Accept: "application/json" },
+  });
+
+  if (!upstreamRes.ok) {
+    return res.status(502).json({
+      success: false,
+      message: `Server sumber merespons dengan status ${upstreamRes.status}.`,
+    });
+  }
+
+  const json = await upstreamRes.json();
+  const track = json.result?.result;
+
+  if (!json.status || !track) {
+    return res.status(200).json({
+      success: false,
+      message: json.message || "Tautan Spotify tidak valid atau lagu tidak ditemukan.",
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      title: track.title || "Tanpa judul",
+      thumbnail: track.image || null,
+      author: track.artist || null,
+      source: "spotify",
+      duration: extractDurationSeconds(track.download?.url),
+      statistics: null,
+      medias: track.download?.url
+        ? [
+            {
+              type: "audio",
+              url: track.download.url,
+              quality: "Original",
+              extension: track.download.quality || "mp3",
+              data_size: null,
+            },
+          ]
+        : [],
+    },
+  });
 }
 
-// Turns "4:11" into 251 (seconds). Spotify's duration arrives pre-formatted
-// as M:SS instead of raw seconds.
-function parseMinSecToSeconds(text) {
-  if (!text || typeof text !== "string") return null;
-  const parts = text.split(":").map((n) => parseInt(n, 10));
-  if (parts.some(Number.isNaN)) return null;
-  return parts.reduce((acc, val) => acc * 60 + val, 0);
+function extractDurationSeconds(downloadUrl) {
+  if (!downloadUrl) return null;
+  try {
+    const dur = new URL(downloadUrl).searchParams.get("duration");
+    return dur ? parseInt(dur, 10) : null;
+  } catch {
+    return null;
+  }
 }
 
 // --- Instagram, proxied through fastvidl.com (no official/public API, so we
